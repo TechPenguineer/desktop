@@ -122,7 +122,7 @@ export interface IDailyMeasures {
    */
   readonly enterpriseCommits: number
 
-  /** The number of times the user made a commit to a repo hosted on Github.com */
+  /** The number of times the user made a commit to a repo hosted on GitHub.com */
   readonly dotcomCommits: number
 
   /** The number of times the user made a commit to a protected GitHub or GitHub Enterprise repository */
@@ -170,6 +170,9 @@ export interface IDailyMeasures {
 
   /** The number of times a successful rebase without conflicts is detected */
   readonly rebaseSuccessWithoutConflictsCount: number
+
+  /** The number of times a rebase finishes without effect because the branch was already up-to-date */
+  readonly rebaseWithBranchAlreadyUpToDateCount: number
 
   /** The number of times a user performed a pull with `pull.rebase` in config set to `true` */
   readonly pullWithRebaseCount: number
@@ -552,6 +555,29 @@ export interface IDailyMeasures {
    */
   readonly pullRequestReviewChangesRequestedDialogSwitchToPullRequestCount: number
 
+  /** The number of "commented PR" notifications the user received */
+  readonly pullRequestCommentNotificationCount: number
+
+  /** The number of "commented PR" notifications the user clicked */
+  readonly pullRequestCommentNotificationClicked: number
+
+  /**
+   * The number of PR comment notifications the user received for a non-recent
+   * repository other than the selected one.
+   */
+  readonly pullRequestCommentNotificationFromNonRecentRepoCount: number
+  /**
+   * The number of PR comment notifications the user received for a recent
+   * repository other than the selected one.
+   */
+  readonly pullRequestCommentNotificationFromRecentRepoCount: number
+
+  /**
+   * The number of times the user decided to switch to the affected pull request
+   * from the PR comment dialog.
+   */
+  readonly pullRequestCommentDialogSwitchToPullRequestCount: number
+
   /** The number of times the user did a multi commit diff where there were unreachable commits */
   readonly multiCommitDiffWithUnreachableCommitWarningCount: number
 
@@ -575,6 +601,18 @@ export interface IDailyMeasures {
 
   /** The number of times a user has opened the preview pull request dialog */
   readonly previewedPullRequestCount: number
+
+  /** The number of times a user initiates (from an empty state) typing in the changes filter bar */
+  typedInChangesFilterCount: 0
+
+  /** The number of times the user applies the "Included in Commit" Filter */
+  appliesIncludedInCommitFilterCount: 0
+
+  /** The number of times the user adjust the filter from warnings about hidden changes */
+  adjustedFiltersForHiddenChangesCount: 0
+
+  /** The number of enterprise accounts the user is signed in to */
+  readonly enterpriseAccountCount: number
 }
 
 export class StatsDatabase extends Dexie {

@@ -5,27 +5,29 @@ import {
   groupRepositories,
   IRepositoryListItem,
   Repositoryish,
-  RepositoryGroupIdentifier,
-  KnownRepositoryGroup,
-  makeRecentRepositoriesGroup,
+  RepositoryListGroup,
+  getGroupKey,
 } from './group-repositories'
-import { FilterList, IFilterListGroup } from '../lib/filter-list'
+import { IFilterListGroup } from '../lib/filter-list'
 import { IMatches } from '../../lib/fuzzy-find'
 import { ILocalRepositoryState, Repository } from '../../models/repository'
 import { Dispatcher } from '../dispatcher'
 import { Button } from '../lib/button'
 import { Octicon } from '../octicons'
-import * as OcticonSymbol from '../octicons/octicons.generated'
+import * as octicons from '../octicons/octicons.generated'
 import { showContextualMenu } from '../../lib/menu-item'
 import { IMenuItem } from '../../lib/menu-item'
 import { PopupType } from '../../models/popup'
 import { encodePathAsUrl } from '../../lib/path'
 import { TooltippedContent } from '../lib/tooltipped-content'
 import memoizeOne from 'memoize-one'
+import { KeyboardShortcut } from '../keyboard-shortcut/keyboard-shortcut'
+import { generateRepositoryListContextMenu } from '../repositories-list/repository-list-item-context-menu'
+import { SectionFilterList } from '../lib/section-filter-list'
+import { assertNever } from '../../lib/fatal-error'
+import { enableMultipleEnterpriseAccounts } from '../../lib/feature-flag'
 
 const BlankSlateImage = encodePathAsUrl(__dirname, 'static/empty-no-repo.svg')
-
-const recentRepositoriesThreshold = 7
 
 interface IRepositoriesListProps {
   readonly selectedRepository: Repositoryish | null
@@ -63,7 +65,7 @@ interface IRepositoriesListProps {
   readonly externalEditorLabel?: string
 
   /** The label for the user's preferred shell. */
-  readonly shellLabel: string
+  readonly shellLabel?: string
 
   /** The callback to fire when the filter text has changed */
   readonly onFilterTextChanged: (text: string) => void
@@ -74,6 +76,10 @@ interface IRepositoriesListProps {
   readonly dispatcher: Dispatcher
 }
 
+interface IRepositoriesListState {
+  readonly newRepositoryMenuExpanded: boolean
+}
+
 const RowHeight = 29
 
 /**
@@ -81,7 +87,9 @@ const RowHeight = 29
  * the id of the provided repository.
  */
 function findMatchingListItem(
-  groups: ReadonlyArray<IFilterListGroup<IRepositoryListItem>>,
+  groups: ReadonlyArray<
+    IFilterListGroup<IRepositoryListItem, RepositoryListGroup>
+  >,
   selectedRepository: Repositoryish | null
 ) {
   if (selectedRepository !== null) {
@@ -100,7 +108,7 @@ function findMatchingListItem(
 /** The list of user-added repositories. */
 export class RepositoriesList extends React.Component<
   IRepositoriesListProps,
-  {}
+  IRepositoriesListState
 > {
   /**
    * A memoized function for grouping repositories for display
@@ -111,11 +119,16 @@ export class RepositoriesList extends React.Component<
   private getRepositoryGroups = memoizeOne(
     (
       repositories: ReadonlyArray<Repositoryish> | null,
-      localRepositoryStateLookup: ReadonlyMap<number, ILocalRepositoryState>
+      localRepositoryStateLookup: ReadonlyMap<number, ILocalRepositoryState>,
+      recentRepositories: ReadonlyArray<number>
     ) =>
       repositories === null
         ? []
-        : groupRepositories(repositories, localRepositoryStateLookup)
+        : groupRepositories(
+            repositories,
+            localRepositoryStateLookup,
+            recentRepositories
+          )
   )
 
   /**
@@ -129,6 +142,14 @@ export class RepositoriesList extends React.Component<
    */
   private getSelectedListItem = memoizeOne(findMatchingListItem)
 
+  public constructor(props: IRepositoriesListProps) {
+    super(props)
+
+    this.state = {
+      newRepositoryMenuExpanded: false,
+    }
+  }
+
   private renderItem = (item: IRepositoryListItem, matches: IMatches) => {
     const repository = item.repository
     return (
@@ -136,18 +157,6 @@ export class RepositoriesList extends React.Component<
         key={repository.id}
         repository={repository}
         needsDisambiguation={item.needsDisambiguation}
-        askForConfirmationOnRemoveRepository={
-          this.props.askForConfirmationOnRemoveRepository
-        }
-        onRemoveRepository={this.props.onRemoveRepository}
-        onShowRepository={this.props.onShowRepository}
-        onViewOnGitHub={this.props.onViewOnGitHub}
-        onOpenInShell={this.props.onOpenInShell}
-        onOpenInExternalEditor={this.props.onOpenInExternalEditor}
-        onChangeRepositoryAlias={this.onChangeRepositoryAlias}
-        onRemoveRepositoryAlias={this.onRemoveRepositoryAlias}
-        externalEditorLabel={this.props.externalEditorLabel}
-        shellLabel={this.props.shellLabel}
         matches={matches}
         aheadBehind={item.aheadBehind}
         changedFilesCount={item.changedFilesCount}
@@ -155,23 +164,27 @@ export class RepositoriesList extends React.Component<
     )
   }
 
-  private getGroupLabel(identifier: RepositoryGroupIdentifier) {
-    if (identifier === KnownRepositoryGroup.Enterprise) {
-      return 'Enterprise'
-    } else if (identifier === KnownRepositoryGroup.NonGitHub) {
+  private getGroupLabel(group: RepositoryListGroup) {
+    const { kind } = group
+    if (kind === 'enterprise') {
+      return enableMultipleEnterpriseAccounts() ? group.host : 'Enterprise'
+    } else if (kind === 'other') {
       return 'Other'
+    } else if (kind === 'dotcom') {
+      return group.owner.login
+    } else if (kind === 'recent') {
+      return 'Recent'
     } else {
-      return identifier
+      assertNever(kind, `Unknown repository group kind ${kind}`)
     }
   }
 
-  private renderGroupHeader = (id: string) => {
-    const identifier = id as RepositoryGroupIdentifier
-    const label = this.getGroupLabel(identifier)
+  private renderGroupHeader = (group: RepositoryListGroup) => {
+    const label = this.getGroupLabel(group)
 
     return (
       <TooltippedContent
-        key={identifier}
+        key={getGroupKey(group)}
         className="filter-list-group-header"
         tooltip={label}
         onlyWhenOverflowed={true}
@@ -192,32 +205,55 @@ export class RepositoriesList extends React.Component<
     this.props.onSelectionChanged(item.repository)
   }
 
+  private onItemContextMenu = (
+    item: IRepositoryListItem,
+    event: React.MouseEvent<HTMLDivElement>
+  ) => {
+    event.preventDefault()
+
+    const items = generateRepositoryListContextMenu({
+      onRemoveRepository: this.props.onRemoveRepository,
+      onShowRepository: this.props.onShowRepository,
+      onOpenInShell: this.props.onOpenInShell,
+      onOpenInExternalEditor: this.props.onOpenInExternalEditor,
+      askForConfirmationOnRemoveRepository:
+        this.props.askForConfirmationOnRemoveRepository,
+      externalEditorLabel: this.props.externalEditorLabel,
+      onChangeRepositoryAlias: this.onChangeRepositoryAlias,
+      onRemoveRepositoryAlias: this.onRemoveRepositoryAlias,
+      onViewOnGitHub: this.props.onViewOnGitHub,
+      repository: item.repository,
+      shellLabel: this.props.shellLabel,
+    })
+
+    showContextualMenu(items)
+  }
+
+  private getItemAriaLabel = (item: IRepositoryListItem) => item.repository.name
+  private getGroupAriaLabelGetter =
+    (
+      groups: ReadonlyArray<
+        IFilterListGroup<IRepositoryListItem, RepositoryListGroup>
+      >
+    ) =>
+    (group: number) =>
+      this.getGroupLabel(groups[group].identifier)
+
   public render() {
-    const baseGroups = this.getRepositoryGroups(
+    const groups = this.getRepositoryGroups(
       this.props.repositories,
-      this.props.localRepositoryStateLookup
+      this.props.localRepositoryStateLookup,
+      this.props.recentRepositories
     )
 
     const selectedItem = this.getSelectedListItem(
-      baseGroups,
+      groups,
       this.props.selectedRepository
     )
 
-    const groups =
-      this.props.repositories.length > recentRepositoriesThreshold
-        ? [
-            makeRecentRepositoriesGroup(
-              this.props.recentRepositories,
-              this.props.repositories,
-              this.props.localRepositoryStateLookup
-            ),
-            ...baseGroups,
-          ]
-        : baseGroups
-
     return (
       <div className="repository-list">
-        <FilterList<IRepositoryListItem>
+        <SectionFilterList<IRepositoryListItem, RepositoryListGroup>
           rowHeight={RowHeight}
           selectedItem={selectedItem}
           filterText={this.props.filterText}
@@ -232,6 +268,9 @@ export class RepositoriesList extends React.Component<
             repositories: this.props.repositories,
             filterText: this.props.filterText,
           }}
+          onItemContextMenu={this.onItemContextMenu}
+          getGroupAriaLabel={this.getGroupAriaLabelGetter(groups)}
+          getItemAriaLabel={this.getItemAriaLabel}
         />
       </div>
     )
@@ -242,11 +281,21 @@ export class RepositoriesList extends React.Component<
       <Button
         className="new-repository-button"
         onClick={this.onNewRepositoryButtonClick}
+        ariaExpanded={this.state.newRepositoryMenuExpanded}
+        onKeyDown={this.onNewRepositoryButtonKeyDown}
       >
         Add
-        <Octicon symbol={OcticonSymbol.triangleDown} />
+        <Octicon symbol={octicons.triangleDown} />
       </Button>
     )
+  }
+
+  private onNewRepositoryButtonKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>
+  ) => {
+    if (event.key === 'ArrowDown') {
+      this.onNewRepositoryButtonClick()
+    }
   }
 
   private renderNoItems = () => {
@@ -256,47 +305,21 @@ export class RepositoriesList extends React.Component<
         <div className="title">Sorry, I can't find that repository</div>
 
         <div className="protip">
-          ProTip! Press {this.renderAddLocalShortcut()} to quickly add a local
-          repository, and {this.renderCloneRepositoryShortcut()} to clone from
-          anywhere within the app
+          ProTip! Press{' '}
+          <div className="kbd-shortcut">
+            <KeyboardShortcut darwinKeys={['⌘', 'O']} keys={['Ctrl', 'O']} />
+          </div>{' '}
+          to quickly add a local repository, and{' '}
+          <div className="kbd-shortcut">
+            <KeyboardShortcut
+              darwinKeys={['⇧', '⌘', 'O']}
+              keys={['Ctrl', 'Shift', 'O']}
+            />
+          </div>{' '}
+          to clone from anywhere within the app
         </div>
       </div>
     )
-  }
-
-  private renderAddLocalShortcut() {
-    if (__DARWIN__) {
-      return (
-        <div className="kbd-shortcut">
-          <kbd>⌘</kbd>
-          <kbd>O</kbd>
-        </div>
-      )
-    } else {
-      return (
-        <div className="kbd-shortcut">
-          <kbd>Ctrl</kbd> + <kbd>O</kbd>
-        </div>
-      )
-    }
-  }
-
-  private renderCloneRepositoryShortcut() {
-    if (__DARWIN__) {
-      return (
-        <div className="kbd-shortcut">
-          <kbd>⇧</kbd>
-          <kbd>⌘</kbd>
-          <kbd>O</kbd>
-        </div>
-      )
-    } else {
-      return (
-        <div className="kbd-shortcut">
-          <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>O</kbd>
-        </div>
-      )
-    }
   }
 
   private onNewRepositoryButtonClick = () => {
@@ -317,7 +340,10 @@ export class RepositoriesList extends React.Component<
       },
     ]
 
-    showContextualMenu(items)
+    this.setState({ newRepositoryMenuExpanded: true })
+    showContextualMenu(items).then(() => {
+      this.setState({ newRepositoryMenuExpanded: false })
+    })
   }
 
   private onCloneRepository = () => {
